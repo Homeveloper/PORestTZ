@@ -1,0 +1,7 @@
+.git
+.gitignore
+.gitattributes
+*.exe
+*.test
+.vscode
+.idea
