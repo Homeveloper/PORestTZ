@@ -21,57 +21,56 @@ func NewWalletRepo(pool *pgxpool.Pool) *WalletRepo {
 	return &WalletRepo{pool: pool}
 }
 
-
 func (r *WalletRepo) ApplyOperation(ctx context.Context, walletID uuid.UUID, op domain.OperationType, amount decimal.Decimal) (decimal.Decimal, error) {
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return decimal.Zero, fmt.Errorf("begin tx: %w", err)
-	}
-
-	defer tx.Rollback(ctx)
-
-	if op == domain.OperationDeposit {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO wallets (id, balance) VALUES ($1, 0)
-			ON CONFLICT (id) DO NOTHING
-		`, walletID)
-		if err != nil {
-			return decimal.Zero, fmt.Errorf("ensure wallet: %w", err)
-		}
-	}
-
-	var balance decimal.Decimal
-	err = tx.QueryRow(ctx, `SELECT balance FROM wallets WHERE id = $1 FOR UPDATE`, walletID).Scan(&balance)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return decimal.Zero, domain.ErrWalletNotFound
-	}
-	if err != nil {
-		return decimal.Zero, fmt.Errorf("lock wallet: %w", err)
-	}
-
-	var newBalance decimal.Decimal
 	switch op {
 	case domain.OperationDeposit:
-		newBalance = balance.Add(amount)
+		return r.deposit(ctx, walletID, amount)
 	case domain.OperationWithdraw:
-		if balance.LessThan(amount) {
-			return decimal.Zero, domain.ErrInsufficientFunds
-		}
-		newBalance = balance.Sub(amount)
+		return r.withdraw(ctx, walletID, amount)
 	default:
 		return decimal.Zero, domain.ErrInvalidOperation
 	}
+}
 
-	_, err = tx.Exec(ctx, `UPDATE wallets SET balance = $1, updated_at = now() WHERE id = $2`, newBalance, walletID)
+
+func (r *WalletRepo) deposit(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) (decimal.Decimal, error) {
+	var balance decimal.Decimal
+	err := r.pool.QueryRow(ctx, `
+		INSERT INTO wallets (id, balance) VALUES ($1, $2)
+		ON CONFLICT (id) DO UPDATE SET balance = wallets.balance + $2, updated_at = now()
+		RETURNING balance
+	`, walletID, amount).Scan(&balance)
 	if err != nil {
-		return decimal.Zero, fmt.Errorf("update balance: %w", err)
+		return decimal.Zero, fmt.Errorf("deposit: %w", err)
 	}
+	return balance, nil
+}
 
-	if err := tx.Commit(ctx); err != nil {
-		return decimal.Zero, fmt.Errorf("commit tx: %w", err)
+func (r *WalletRepo) withdraw(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) (decimal.Decimal, error) {
+	var balance decimal.Decimal
+	err := r.pool.QueryRow(ctx, `
+		UPDATE wallets
+		SET balance = balance - $2, updated_at = now()
+		WHERE id = $1 AND balance >= $2
+		RETURNING balance
+	`, walletID, amount).Scan(&balance)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		
+		var exists bool
+		checkErr := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wallets WHERE id = $1)`, walletID).Scan(&exists)
+		if checkErr != nil {
+			return decimal.Zero, fmt.Errorf("check wallet existence: %w", checkErr)
+		}
+		if !exists {
+			return decimal.Zero, domain.ErrWalletNotFound
+		}
+		return decimal.Zero, domain.ErrInsufficientFunds
 	}
-
-	return newBalance, nil
+	if err != nil {
+		return decimal.Zero, fmt.Errorf("withdraw: %w", err)
+	}
+	return balance, nil
 }
 
 func (r *WalletRepo) GetBalance(ctx context.Context, walletID uuid.UUID) (decimal.Decimal, error) {

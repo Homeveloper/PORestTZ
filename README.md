@@ -12,3 +12,12 @@
 
 ```bash
 docker compose up -d --build
+
+## Нагрузочное тестирование (1000 RPS на один кошелёк)
+
+В `cmd/loadtest` — отдельная утилита, которая шлёт HTTP-запросы с заданным
+темпом на один и тот же кошелёк и считает коды ответов и задержки:
+
+```bash
+docker compose up -d --build
+go run ./cmd/loadtest -rps=1000 -duration=10s
